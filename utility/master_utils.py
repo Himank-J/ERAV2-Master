@@ -171,6 +171,7 @@ class TrainTest():
                 output = model(data)
                 test_loss += criterion(output, target).item()  # sum up batch loss
 
+                pred = output.argmax(dim=1, keepdim=True)
                 correct += self.GetCorrectPredCount(output, target)
                 try:
                   misclassified_indices = ~pred.eq(target.view_as(pred)).squeeze()
