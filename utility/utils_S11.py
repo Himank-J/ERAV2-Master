@@ -251,7 +251,7 @@ def plot_misclassification(misclassified, plot_sample_count=20):
 
     return shortlisted_misclf_images
 
-def getGradCamImages(net,shortlisted_misclf_images):
+def getGradCamImages(net,shortlisted_misclf_images,plot_sample):
     
     target_layers = [net.layer3]
     cam = GradCAM(model=net, target_layers=target_layers)
