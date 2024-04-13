@@ -1,4 +1,6 @@
+import math
 import torch
+import numpy as np
 from tqdm import tqdm
 import torch.nn as nn
 import albumentations as A
@@ -8,6 +10,9 @@ from torchvision import datasets
 from torch_lr_finder import LRFinder
 from torchvision.utils import make_grid
 from albumentations.pytorch import ToTensorV2
+from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam.utils.image import show_cam_on_image
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
 class Cifar10SearchDataset(datasets.CIFAR10):
 
@@ -93,7 +98,7 @@ class LearningRateFinder():
     def findLR(self,model,train_loader):
 
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.SGD(model.parameters(), lr=1e-7, weight_decay=1e-2)
+        optimizer = optim.SGD(model.parameters(), lr=0.03, weight_decay=1e-4)
         
         if self.__cuda:
             self.__lr_finder = LRFinder(model, optimizer, criterion, device="cuda")
@@ -102,7 +107,7 @@ class LearningRateFinder():
         else:
             self.__lr_finder = LRFinder(model, optimizer, criterion, device="cpu")
 
-        self.__lr_finder.range_test(train_loader, end_lr=100, num_iter=100, step_mode="exp")
+        self.__lr_finder.range_test(train_loader, end_lr=10, num_iter=200, step_mode="exp")
     
     def visualizeLR(self):
 
@@ -184,3 +189,88 @@ class TrainTest():
         axs[0, 1].set_title("Test Loss")
         axs[1, 1].plot(test_acc)
         axs[1, 1].set_title("Test Accuracy")
+
+def getMisclassifiedImages(model, device, test_loader):
+    misclassified = []
+    model.eval()
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            pred = output.argmax(dim=1, keepdim=True)
+            bool_ls = pred.eq(target.view_as(pred)).view_as(target)
+            bl = torch.where(bool_ls == False)[0]
+            misclassified.append(
+                (torch.index_select(data, 0, bl),
+                torch.index_select(target, 0, bl),
+                torch.index_select(pred.view_as(target), 0, bl))
+            )
+    return misclassified
+
+classes = (
+    "plane",
+    "car",
+    "bird",
+    "cat",
+    "deer",
+    "dog",
+    "frog",
+    "horse",
+    "ship",
+    "truck",
+)
+
+def inverse_normalize(tensor, mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010)):
+    mean = torch.as_tensor(mean, dtype=tensor.dtype, device=tensor.device)
+    std = torch.as_tensor(std, dtype=tensor.dtype, device=tensor.device)
+    tensor.mul_(std).add_(mean)
+    return tensor
+
+def plot_misclassification(misclassified, plot_sample_count=20):
+    shortlisted_misclf_images = list()
+    mc_list_index = torch.randint(0, len(misclassified), (1,))[0]
+    print(mc_list_index)
+
+    fig = plt.figure(figsize=(12, 9))
+    for i in range(plot_sample_count):
+        a = fig.add_subplot(math.ceil(plot_sample_count/4.0), 4, i+1)
+        batch_len = misclassified[mc_list_index][0].shape[0] - 1
+        batch_idx = torch.randint(0, batch_len, (1,))[0]
+        image = misclassified[mc_list_index][0][batch_idx]  # Image
+        actual = misclassified[mc_list_index][1][batch_idx]  # Actual
+        predicted = misclassified[mc_list_index][2][batch_idx]  # Predicted
+        npimg = image.cpu().numpy()
+        nptimg = np.transpose(npimg, (1, 2, 0))
+        inverse_normalize(torch.Tensor(nptimg))
+        plt.imshow(nptimg)
+        shortlisted_misclf_images.append(
+            (nptimg, classes[actual], classes[predicted], actual, predicted))
+        a.axis("off")
+        title = f"Actual: {classes[actual]} | Predicted: {classes[predicted]}"
+        a.set_title(title, fontsize=10)
+
+    return shortlisted_misclf_images
+
+def getGradCamImages(net,shortlisted_misclf_images):
+    
+    target_layers = [net.layer3]
+    cam = GradCAM(model=net, target_layers=target_layers)
+    fig = plt.figure(figsize=(12, 9))
+    for i in range(len(shortlisted_misclf_images)):
+        a = fig.add_subplot(math.ceil(plot_sample/4.0), 4, i+1)
+        # All in a batch
+        ip_img = shortlisted_misclf_images[i][0]
+        # plt.imshow(ip_img)
+        input_tensor = torch.Tensor(np.transpose(ip_img, (2, 0, 1))).unsqueeze(dim=0)
+        targets = [ClassifierOutputTarget(int(shortlisted_misclf_images[i][3]))]
+        # You can also pass aug_smooth=True and eigen_smooth=True, to apply smoothing.
+        grayscale_cam = cam(input_tensor=input_tensor, targets=targets, aug_smooth=True)
+    
+        # In this example grayscale_cam has only one image in the batch:
+        grayscale_cam = grayscale_cam[0, :]
+        visualization = show_cam_on_image(ip_img, grayscale_cam, use_rgb=True)
+        plt.imshow(visualization)
+    
+        a.axis("off")
+        title = f"Actual: {shortlisted_misclf_images[i][1]} | Predicted: {shortlisted_misclf_images[i][2]}"
+        a.set_title(title, fontsize=10)
